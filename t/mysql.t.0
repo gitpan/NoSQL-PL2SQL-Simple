@@ -238,7 +238,8 @@ is( $krassner->SQLObjectID => $id ) ;
 ## Pull out one of the Schueler records, and replace with another
 
 my $core = shift @cent ;
-$employees->record( 8358 )->save( $core ) ;
+my $family = $family[4] ;
+$employees->record( $family )->save( $core ) ;
 
 ## After two replacements, the record count should remain unchanged
 
@@ -252,7 +253,7 @@ is( scalar @family => 10 ) ;
 
 ## Record now contains replacment data
 
-is( $employees->record( 8358 )->{firstname}, 'Marsja' ) ;
+is( $employees->record( $family )->{firstname}, 'Marsja' ) ;
 
 ## Search criteria based on replacement data
 
@@ -262,7 +263,7 @@ is( $employees->record( 8358 )->{firstname}, 'Marsja' ) ;
 ## Search results should uniquely identify the former Schueler record
 
 is( scalar @query => 1 ) ;
-is( $query[0]->SQLObjectID => 8358 ) ;
+is( $query[0]->SQLObjectID => $family ) ;
 
 ## Test the archive feature.  Modify the data definition
 
@@ -276,6 +277,7 @@ is( scalar @schueler => 1 ) ;
 
 ## Swap out another Schueler record
 
+$id = $employees->record( $schueler[0] )->{id} ;
 $employees->record( $schueler[0] )->save( shift @cent ) ;
 
 ## Numbers are dwindling...
@@ -299,7 +301,7 @@ is( scalar @ok => 1 ) ;
 
 ## Results match original data?
 
-is( $ok[0]->{id} => 15975 ) ;
+is( $ok[0]->{id} => $id ) ;
 
 ## Record is hidden from searches
 

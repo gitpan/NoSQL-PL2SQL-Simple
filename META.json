@@ -32,10 +32,10 @@
       },
       "runtime" : {
          "requires" : {
-            "NoSQL::PL2SQL" : "1"
+            "NoSQL::PL2SQL" : "1.14"
          }
       }
    },
    "release_status" : "stable",
-   "version" : "0.10"
+   "version" : "0.20"
 }

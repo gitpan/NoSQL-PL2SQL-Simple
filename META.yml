@@ -18,5 +18,5 @@ no_index:
     - t
     - inc
 requires:
-  NoSQL::PL2SQL: 1
-version: 0.10
+  NoSQL::PL2SQL: 1.14
+version: 0.20

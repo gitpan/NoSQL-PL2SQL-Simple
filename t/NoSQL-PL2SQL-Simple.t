@@ -5,7 +5,7 @@
 
 # change 'tests => 1' to 'tests => last_test_to_print';
 
-use Test::More tests => 45;
+use Test::More tests => 55;
 BEGIN { use_ok('XML::Parser::Nodes') };
 BEGIN { use_ok('NoSQL::PL2SQL::DBI::SQLite') };
 BEGIN { use_ok('NoSQL::PL2SQL::DBI') };
@@ -57,7 +57,7 @@ my @dsn = TQIS::Employees->dsn ;
 is( scalar @dsn => 2 ) ;
 is( $dsn[0]->table => 'objectdata' ) ;
 
-my @dsn = TQIS::Employees->dsn ;
+@dsn = TQIS::Employees->dsn ;
 TQIS::DataSource->loadschema ;
 
 ## Test loadschema().  Ensure it's called independently on separate 
@@ -76,7 +76,7 @@ exit unless -f $testdatafn ;
 my $nodes = new XML::Parser::Nodes $testdatafn ;
 my @staff = map { $_->asobject } 
 		$nodes->childnode('testdata')->childnode('employees') ;
-@cent = splice @staff, -100, 100 ;
+my @cent = splice @staff, -100, 100 ;
 
 ## Data definitions
 
@@ -96,7 +96,6 @@ map { $employees->record( $_ ) } @staff ;
 # my $employees = new TQIS::Employees ;
 
 ## How many records, a reasonably large group
-
 my @query = $employees->query ;
 is( scalar @query => 16899 ) ;
 
@@ -231,7 +230,8 @@ is( $krassner->SQLObjectID => $id ) ;
 ## Pull out one of the Schueler records, and replace with another
 
 my $core = shift @cent ;
-$employees->record( 8358 )->save( $core ) ;
+my $family = $family[4] ;
+$employees->record( $family )->save( $core ) ;
 
 ## After two replacements, the record count should remain unchanged
 
@@ -245,7 +245,7 @@ is( scalar @family => 10 ) ;
 
 ## Record now contains replacment data
 
-is( $employees->record( 8358 )->{firstname}, 'Marsja' ) ;
+is( $employees->record( $family )->{firstname}, 'Marsja' ) ;
 
 ## Search criteria based on replacement data
 
@@ -255,11 +255,12 @@ is( $employees->record( 8358 )->{firstname}, 'Marsja' ) ;
 ## Search results should uniquely identify the former Schueler record
 
 is( scalar @query => 1 ) ;
-is( $query[0]->SQLObjectID => 8358 ) ;
+is( $query[0]->SQLObjectID => $family ) ;
 
 ## Test the archive feature.  Modify the data definition
 
-$employees->addNumberIndex( 'archive' ) ;
+TQIS::Employees->new->addNumberIndex('archive') ;
+$employees = new TQIS::Employees ;
 
 ## Record is visible to searches
 
@@ -269,6 +270,7 @@ is( scalar @schueler => 1 ) ;
 
 ## Swap out another Schueler record
 
+$id = $employees->record( $schueler[0] )->{id} ;
 $employees->record( $schueler[0] )->save( shift @cent ) ;
 
 ## Numbers are dwindling...
@@ -292,7 +294,7 @@ is( scalar @ok => 1 ) ;
 
 ## Results match original data?
 
-is( $ok[0]->{id} => 15975 ) ;
+is( $ok[0]->{id} => $id ) ;
 
 ## Record is hidden from searches
 
@@ -340,6 +342,41 @@ is( @ok => 0 ) ;
 @ok = $contacts->query( lastname => 'Tischendorf',
 		birthday => '1955-04-29' )->records ;
 is( @ok => 1 ) ;
+
+## Added keyvalues() method
+
+TQIS::Employees->new->addTextIndex('dependents') ;
+$employees = new TQIS::Employees ;
+
+@schueler = $employees->lastname('Schueler')->records ;
+$id = $schueler[0]->SQLObjectID ;
+
+@ok = $schueler[0]->keyValues('dependents') ;
+warn "\n TQIS ", $ok[0] ;
+is( @ok => 0 ) ;
+
+$schueler[0]->keyValues( dependents => qw( Eva Hans Clara ) ) ;
+@ok = $schueler[0]->keyValues('dependents') ;
+is( @ok => 3 ) ;
+
+@ok = $employees->dependents('Clara')->recordID ;
+is( @ok => 1 ) ;
+is( $ok[0] => $id ) ;
+
+@ok = $employees->dependents('Hans')->recordID ;
+is( @ok => 1 ) ;
+is( $ok[0] => $id ) ;
+
+@ok = $employees->dependents('Eva')->recordID ;
+is( @ok => 1 ) ;
+is( $ok[0] => $id ) ;
+
+$schueler[0]->keyValues('dependents')->clear ;
+@ok = $schueler[0]->keyValues('dependents') ;
+is( @ok => 0 ) ;
+
+@ok = $employees->dependents('Eva')->recordID ;
+is( @ok => 0 ) ;
 
 
 1

@@ -19,7 +19,7 @@ our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } ) ;
 our @EXPORT = qw(
 	) ;
 
-our $VERSION = '0.10' ;
+our $VERSION = '0.20' ;
 
 use Scalar::Util ;
 use base qw( NoSQL::PL2SQL ) ;
@@ -58,15 +58,28 @@ $private{update} = sub {
 
 ################################################################################
 ##
-##  recno() is part of the constructor.  It uses internal methods of
-##  NoSQL::PL2SQL::Object to pull out the unique recordID.
+##  sqlsave() rolls back the rollback
+##
+################################################################################
+
+$private{sqlsave} = sub {
+	my $self = shift ;
+	my $tied = tied %$self ;
+	delete $tied->{globals}->{rollback} ;
+	} ;
+
+
+################################################################################
+##
+##  recno() is part of the constructor.  It uses the internal structure
+##  of NoSQL::PL2SQL::Object to pull out the unique recordID.
 ##
 ################################################################################
 
 $private{recno} = sub {
 	my $self = shift ;
 	my $tied = tied %$self ;
-	return $tied->{top} unless @_ ;
+	return $tied->record->{objectid} || $tied->{top} unless @_ ;
 
 	my $key = shift ;
 	return $tied->data->{$key}->{top} ;
@@ -146,6 +159,7 @@ $private{matching} = sub {
 	unless ( @_ ) {
 		my @rows = $tied->{dsn}->{index}->fetch( @sql ) ;
 		return $rows[0] unless ref $rows[0] ;
+		return [] unless keys %{ $rows[0] } ;
 
 		my @out = map { $_->{objectid} 
 				=> $_->{ $format->[1] } } @rows ;
@@ -157,8 +171,7 @@ $private{matching} = sub {
 
 	my @rows = $tied->{dsn}->{index}->fetch( @sql ) ;
 	return $rows[0] if @rows && ! ref $rows[0] ;
-
-	return [] unless keys %{ $rows[0] } ;	## bit of a kludge
+	return [] unless keys %{ $rows[0] } ;
 
 	my @out = map { $_->{objectid} => $_->{ $format->[1] } } @rows ;
 	return \@out ;
@@ -188,6 +201,18 @@ $private{indexmap} = sub {
 	return \@index ;
 	} ;
 
+################################################################################
+##
+##  getinstance() returns null for passed instances
+##  distinguishes between instances and objects
+##
+################################################################################
+
+$private{getinstance} = sub {
+	my $self = shift ;
+	my $tied = tied %$self ;
+	return $tied->{parent} ;
+	} ;
 
 ################################################################################
 ##
@@ -314,6 +339,7 @@ sub records {
 	my $array = shift ;
 	my @args = @$array ;
 	my $self = shift @args ;
+
 	my @out = map { $self->record( $_ ) } keys %{ { @args } } ;
 	return $out[0] if @out && ! wantarray ;
 	return @out ;
@@ -330,21 +356,22 @@ sub record {
 
 	&{ $private{update} }( $self ) ;
 
-	my $arg = shift ;
+	my @args = ( shift @_ ) ;
+	push @args, ( shift @_ ) if @_ && ref $_[0] ;
+	push @args, undef ;
 	my ( $objectid, $value ) = 
-			ref $arg? ( undef, $arg ): ( $arg, undef ) ;
+			ref $args[0]? ( undef, $args[0] ): @args[0,1] ;
 
-	my $vv = tied %$value if $value ;
+	my $vv = tied %$value if $value && ref $value eq ref $self ;
 	my $update = ! defined $objectid ;
-
-	$value = shift( @_ ) if @_ && ! defined $objectid ;
+	$#args = 0 if defined $objectid ;
 	$objectid = $vv->{id} if defined $vv && exists $vv->{id} ;
-
-	my $tempvalue ;
 
 	my $dsn = $tied->{dsn}->{object} ;
 	my $index = $tied->{dsn}->{index} ;
 
+	my $lastvalue ;
+	my $out = $vv || {} ;
 	my %index = @_ ;
 	my @index = () ;
 	if ( $value ) {
@@ -356,61 +383,52 @@ sub record {
 				keys %$self ;
 		}
 
-	## Replacing an existing object:
-	##   Create a new object, save the new objectid as $archive
-	##   Delete the new object
-	##   Reassign the existing objectid to $archive
-	##   Delete all index references
-	##   Insert an index archive entry keyed on existing objectid
-	##   Add the new object using the existing objectid
-	##   Create new index references
-
-	## This sequence ensures that external references always point
-	## to the most current object; the internal reference keys always
-	## reflect the object data; and the brute force sqlupdate() is
-	## much more efficient than an SQL pull/push operation.
-
-	while ( 1 ) {
-		unless ( defined $value && defined $objectid ) {
-			$tempvalue = $package->SQLObject(
-					$dsn, $objectid || $value ) ;
+	while ( defined $value ) {
+		unless ( defined $objectid ) {
+			$lastvalue = $package->SQLObject( $dsn, $value ) ;
 			last ;
 			}
 
 		$update = 1 ;
 		$index->delete( [ objectid => $objectid ] ) ;
 
-		unless ( $self->archive) {
+		my $archive = $package->SQLClone( $dsn, $objectid )
+				if $self->{archive} ;
+
+		if ( defined $args[1] ) {
+			delete $out->{clone} ;
 			$dsn->delete( [ objectid => $objectid ] ) ;
-			last ;
+			$out->{clone} = $package->SQLObject( 
+					$dsn, $objectid, $args[1] 
+					) ;
+			}
+		else {
+			&{ $private{sqlsave} }( $out->{clone} ) ;
 			}
 
-		my $archive = $package->SQLObject( $dsn, {} )->sqlobjectid ;
+		last unless defined $archive ;
 
-		$dsn->delete( [ objectid => $archive ] ) ;
-		my $nvp = NoSQL::PL2SQL::DBI->new('')->insert( 
-				[ objectid => $archive ] 
-				)->{nvp} ;
-		$dsn->sqlupdate( $nvp, [ objectid => $objectid ] ) ;
-
+		my $archiveid = &{ $private{recno} }(
+				$package->SQLObject( $dsn, $archive )
+				) ;
 		$index->insert( 
 				[ intkey => $tied->{keys}->{archive} ],
 				[ intvalue => $objectid ],
-				[ objectid => $archive ]
+				[ objectid => $archiveid ]
 				) ;
 		last ;
 		}
 
-	$value = $tempvalue || $package->SQLObject( $dsn, $objectid, $value ) ;
-
-	my $out = {} ;
+	delete $out->{clone} ;
+	$out->{clone} = $lastvalue || $package->SQLObject( $dsn, $objectid ) ;
+	return undef unless $out->{clone} ;
+	$out->{clone}->SQLRollback ;
+	$out->{id} = $out->{clone}->sqlobjectid ;	## lc method name
 	$out->{parent} = $self ;
-	$out->{clone} = $value->sqlclone ;
-	$out->{id} = $value->sqlobjectid ;
 
 	map { $index->update( undef, @$_ ) }
 			map { &{ $private{indexmap} }( 
-			  $self, $_, $value, $out->{id} )
+			  $self, $_, $out->{clone}, $out->{id} )
 			  } @index ;
 
 	$index->update( undef,
@@ -462,6 +480,34 @@ sub SQLObjectID {
 	return $tied->{id} ;
 	}
 
+sub keyValues {
+	my $self = shift ;
+	my $indexid = shift ;
+
+	my $instance = &{ $private{getinstance} }( $self ) ;
+	carp "Argument is not an object" and return () unless $instance ;
+
+	my $tied = tied %$instance ;
+	my $dsn = $tied->{dsn}->{index} ;
+	my $format = $sql{ $instance->{$indexid} } ;
+	my @sql = ( [ $format->[0], $tied->{keys}->{$indexid} ], 
+			[ objectid => $self->SQLObjectID ] ) ;
+
+	if ( @_ == 0 ) {
+		return bless [ $dsn, @sql ], __PACKAGE__ .'::keyValues'
+				unless wantarray ;
+		return map { $_->{ $format->[1] } } $dsn->fetch( @sql ) ;
+		}
+
+	map { $dsn->insert( @sql, [ $format->[1], $_, $format->[2] ] ) } @_ ;
+	}
+
+sub NoSQL::PL2SQL::Simple::keyValues::clear {
+	my $args = shift ;
+	my $dsn = shift @$args ;
+	$dsn->delete( @$args ) ;
+	}
+
 sub query {
 	my $self = shift ;
 	my $package = ref $self ;
@@ -506,8 +552,9 @@ sub AUTOLOAD {
 
 	my $argct = scalar @_ ;
 	my $out = &{ $private{matching} }( $self, $func, @_ ) ;
-	return $out unless ref $out ;
+	return $out if defined $out && ! ref $out ;
 
+	$out ||= [] ;
 	my $asarray = bless [ $self, @$out ], $package ;
 	return $asarray unless wantarray ;
 	return $argct? $asarray->recordID: @$out ;
@@ -517,6 +564,8 @@ __PACKAGE__->SQLError( ObjectNotFound => sub {
 		my $package = shift ;
 		my $error = shift ;
 		my $errortext = pop ;
+
+		return carp( $errortext ) && undef if $_[-1] ;
 		return $package->SQLObject( @_, {} ) ;
 		} ) ;
 
@@ -547,8 +596,8 @@ NoSQL::PL2SQL::Simple - Implementation of NoSQL::PL2SQL
   my $collection = new MyArbitraryClass ;
 
   ## Writing to the database
-  $collection->record( CGI::Var() ) ;	## Save user input
-  $collection->save( CGI::Var() ) ;	## save() is an alias
+  $collection->record( CGI->new->Vars ) ;	## Save user input
+  $collection->save( CGI->new->Vars ) ;	## save() is an alias
 
   ## Accessing the database
   @allemails = values %{ { $collection->contactemail } } ;
@@ -604,7 +653,7 @@ NoSQL::PL2SQL::Simple can be used to maintain the profile records of an access c
   ## an automatic assignment, which should be returned as part of the
   ## confirmation.
 
-  $userid = $collection->record( CGI::Var() )->SQLObjectID ;
+  $userid = $collection->record( CGI->new->Vars )->SQLObjectID ;
 
   ## If the user logs back in using the $userid, his/her record is
   ## recovered as follows:
@@ -620,22 +669,36 @@ NoSQL::PL2SQL::Simple can be used to maintain the profile records of an access c
   ## If the website contains a profile editting form, then replace the 
   ## entire record with the form data:
 
-  $collection->record( $userrecord, CGI::Var() ) ;
+  $collection->record( $userrecord, CGI->new->Vars ) ;
 
 C<recordID()> is a used to convert query results to record id's (otherwise known as object id's).
 
 C<SQLObjectID()> returns the object id automatically generated by C<NoSQL::PL2SQL>.
 
+C<keyValues()> establishes many-to-one and many-to-many relationships among objects, and has three variants:
+
+=over 8
+
+To add a relationships, pass one or more values as arguments to the C<keyValues()> method.
+
+To list relationships, pass no arguments to the C<keyValues()> method.
+
+To clear all relationships, chain the c<keyValues()> method as follows: C<< $o->keyValues()->clear() >>.
+
+=back
+
+See the B<MANY-TO-ONE RELATIONSHIPS> section below.
+
 C<save()> is an alias for C<record()>.  Each of the pair of statements below are equivalent:
 
-  $collection->record( CGI::Var() ) ;
-  $collection->save( CGI::Var() ) ;
+  $collection->record( CGI->new->Vars ) ;
+  $collection->save( CGI->new->Vars ) ;
 
   $collection->record( $userrecord ) ;
   $userrecord->save() ;
 
-  $collection->record( $userrecord, CGI::Var() ) ;
-  $userrecord->save( CGI::Var() ) ;
+  $collection->record( $userrecord, CGI->new->Vars ) ;
+  $userrecord->save( CGI->new->Vars ) ;
 
 =head3 Data Queries
 
@@ -644,7 +707,7 @@ C<query()> is used to query the database.  Its arguments are name-value-pairs (N
   ## In the above example, the user recovers his/her userid by querying
   ## an email address:
 
-  my $cgivars = CGI::Var()
+  my $cgivars = CGI->new->Vars
 
   my @userids = $collection->query( 
 			contactemail => $cgivars->{contactemail},
@@ -720,7 +783,7 @@ C<addDateIndex()>
 
 =back
 
-C<reindex()> updates the database to reflect data definition changes.  It requires a data element argument.  See the B<Indexes> section below.
+C<reindex()> updates the database to reflect data definition changes.  It requires a data element argument.  See the B<INDEXES> section below.
 
 =head1 DEFINING CLASSES
 
@@ -816,7 +879,7 @@ The actual data definition is built using the data definition methods described 
 		yeargraduated => '1989',
 		)->records ;
 
-The data definition only needs to define object properties that will be queried.  See the B<Indexes> section below.
+The data definition only needs to define object properties that will be queried.  See the B<INDEXES> section below.
 
 The definition may also include an I<archive> element.  (Object elements named archive will be ignored.)  The I<archive> data definition prevents object data from being deleted.  Instead, when a record is replaced, the original record is assigned a new object id; and the replacement is inserted into the database with the value of the existing object id. 
 
@@ -830,12 +893,12 @@ The definition may also include an I<archive> element.  (Object elements named a
   my $members = new TQIS::GPRC::Members ;
 
   ## Create a new member from webform data 
-  my $memberid = $members->record( CGI::Var() )->SQLObjectID ;
+  my $memberid = $members->record( CGI->new->Vars )->SQLObjectID ;
 
   ## An application may email the $memberid as a confirmation.
   ## Later on, the $memberid may be used to replace the member
   ## data with something else
-  $members->record( $memberid )->save( CGI::Var() ) ;
+  $members->record( $memberid )->save( CGI->new->Vars ) ;
 
   ## The new data is returned by default
   my $member = $members->record( $memberid ) ;
@@ -949,7 +1012,7 @@ In order to implement NoSQL::PL2SQL's support for indeterminate objects, the cla
   $members->addTextIndex('byemail') ;
   
   ## add a new member
-  $members->record( CGI::Var(), 
+  $members->record( CGI->new->Vars, 
 		workemail => 'byemail', homeemail => 'byemail' ) ;
 
   ## This approach creates two records in the index table (three if 
@@ -961,13 +1024,56 @@ In order to implement NoSQL::PL2SQL's support for indeterminate objects, the cla
   $jim = $members->byemail('jim@home.tqis.com')->record ;
 
   ## this approach must be implemented consistently
-  $jim->save( CGI::Var(), workemail => 'byemail', homeemail => 'byemail' ) ;
+  $jim->save( CGI->new->Vars, workemail => 'byemail', homeemail => 'byemail' ) ;
 
   ## reindexing also allows mapping:
   map { $members->record( $_ )->reindex( workemail => 'byemail' ) }
 		$members->query ;
   map { $members->record( $_ )->reindex( homeemail => 'byemail' ) }
 		$members->query ;
+
+=head1 MANY-TO-ONE RELATIONSHIPS
+
+Most of the time, database records can be accessed using a one-to-many
+relationship.  For example, a calendar application would primarily consist of I<event objects> whose elements include a single date, say February 14.  Many events can share that date, so when I<February 14> is queried, all the matching events can be displayed.
+
+NoSQL::PL2SQL::Simple handles all of these relationships automatically.  If the object's date is changed to February 17, the correspondence from February 14 is automatically broken and all future queries will return expected results.
+
+This example, which assumes that events only correspond to a single date, represents a one-to-many relationship.  Eg, one date corresponds to many events.  In a more complicated data model, events can correspond to many dates, if the event occurs repeatedly or spans more than one day.  This more complicated model is called many-to-many: multiple objects per key and multiple keys per object.
+
+NoSQL::PL2SQL::Simple automates the multiple objects per key functionality; but handling multiple keys per object requires explicit management using the C<keyValues()> method.  In a web-based calendar, the defined properties might be the record owner and location (zipcode).  If event entries always correspond to a single date, then the date will also be a defined property.  NoSQL::PL2SQL::Simple automatically manages queries for defined properties.
+
+If the event can correspond to many dates, the web interface becomes more complicated.  This codes demonstrates several different scenarios:
+
+  my $events = new mycalendar::event ;		## $events is an instance
+  print $events->{eventdate}, "\n" ;		## prints: I<datekey>
+  my $event = $events->record( CGI->new->Vars ) ;	## $event is an object
+
+  ## One scenario is that the interface returns a set of dates
+  ## such as a string containing many separated dates.
+  my @dates = split /,/, $event->{datelist} ;
+  $event->keyValues( eventdate => @dates ) ;	## add the set of dates
+
+  ## In this scenario, when the record is edited, simply replace the
+  ## set of dates:
+  $event->keyValues('eventdate')->clear() ;	## clear the existing set
+  $event->keyValues( eventdate => split /,/, CGI->new->Vars->{datelist} ) ;
+
+  ## Another scenario is an interface worksheet that adds dates one at a time
+  $event->keyValues( eventdate => CGI->new->Vars->{nextdate} ) ;
+
+  ## The named property I<nextdate> must be distinct from the named
+  ## property I<eventdate> to prevent automatic key management
+
+  ## Repeat this process everytime a new date is added.  The interface should
+  ## prevent a duplicate date selection
+  $event->keyValues( eventdate => CGI->new->Vars->{nextdate} ) ;
+
+  ## The interface should allow users to delete date selections
+  my $delete = CGI->new->Vars->{deletedate} ;
+  my @replace = grep $_ ne $delete, $event->keyValues('eventdate') ;
+  $event->keyValues('eventdate')->clear() ;
+  $event->keyValues( eventdate => @replace ) ;
 
 =head1 DEVELOPERS NOTES
 
