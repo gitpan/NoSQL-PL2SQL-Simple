@@ -19,7 +19,7 @@ our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } ) ;
 our @EXPORT = qw(
 	) ;
 
-our $VERSION = '0.20' ;
+our $VERSION = '0.21' ;
 
 use Scalar::Util ;
 use base qw( NoSQL::PL2SQL ) ;
@@ -278,6 +278,8 @@ sub new {
 	my $dsn = {} ;
 	$dsn->{object} = shift @dsn ;
 	$dsn->{index} = shift @dsn ;
+
+	$package->SQLError( ObjectNotFound => \&newobject ) ;
 
 	my $o = $package->SQLObject( $dsn->{object}, 0 ) ;
 	$self->{id} = &{ $private{recno} }( $o ) ;
@@ -560,14 +562,14 @@ sub AUTOLOAD {
 	return $argct? $asarray->recordID: @$out ;
 	}
 
-__PACKAGE__->SQLError( ObjectNotFound => sub {
-		my $package = shift ;
-		my $error = shift ;
-		my $errortext = pop ;
+sub newobject {
+	my $package = shift ;
+	my $error = shift ;
+	my $errortext = pop ;
 
-		return carp( $errortext ) && undef if $_[-1] ;
-		return $package->SQLObject( @_, {} ) ;
-		} ) ;
+	return carp( $errortext ) && undef if $_[-1] ;
+	return $package->SQLObject( @_, {} ) ;
+	}
 
 sub END {
 	undef @autodestroy ;

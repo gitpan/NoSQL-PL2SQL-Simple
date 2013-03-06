@@ -11,3 +11,6 @@ Revision history for Perl extension NoSQL::PL2SQL::Simple.
 	- Added keyValues() method for many-to-one and many-to-many
 	  relationships
 
+0.21  Tue Mar  5 19:35:02 EST 2013
+	- Added newobject() method and modified constructor
+	  to accomodate changes in NoSQL::PL2SQL.
