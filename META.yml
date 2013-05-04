@@ -1,7 +1,7 @@
 ---
 abstract: 'Implementation of NoSQL::PL2SQL'
 author:
-  - 'root <root@tqis.com>'
+  - 'Jim Schueler <jim@tqis.com>'
 build_requires:
   ExtUtils::MakeMaker: 0
 configure_requires:
@@ -18,5 +18,5 @@ no_index:
     - t
     - inc
 requires:
-  NoSQL::PL2SQL: 1.14
-version: 0.21
+  NoSQL::PL2SQL: 1.21
+version: 0.22

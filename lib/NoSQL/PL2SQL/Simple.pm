@@ -19,7 +19,7 @@ our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } ) ;
 our @EXPORT = qw(
 	) ;
 
-our $VERSION = '0.21' ;
+our $VERSION = '0.22' ;
 
 use Scalar::Util ;
 use base qw( NoSQL::PL2SQL ) ;
@@ -269,6 +269,10 @@ sub NEXTKEY {
 	}
 
 sub new {
+	return db( @_ ) ;
+	}
+
+sub db {
 	my $package = shift ;
 	my $self = {} ;
 
@@ -332,9 +336,8 @@ sub recordID {
 	my $array = shift ;
 	my @args = @$array ;
 	my $self = shift @args ;
-	my @keys = keys %{ { @args } } ;
-	return $keys[0] unless wantarray ;
-	return @keys ;
+	return $args[0] unless wantarray ;
+	return @args ;
 	}
 
 sub records {
@@ -342,7 +345,7 @@ sub records {
 	my @args = @$array ;
 	my $self = shift @args ;
 
-	my @out = map { $self->record( $_ ) } keys %{ { @args } } ;
+	my @out = map { $self->record( $_ ) } @args ;
 	return $out[0] if @out && ! wantarray ;
 	return @out ;
 	}
@@ -510,35 +513,65 @@ sub NoSQL::PL2SQL::Simple::keyValues::clear {
 	$dsn->delete( @$args ) ;
 	}
 
+sub delete {
+	my $self = shift ;
+	my $tied = tied %$self ;
+	my $package = ref $self ;
+
+	return undef unless @_ ;
+	my $recno = shift ;
+	
+	if ( ref $recno ) {
+		my $rec = tied %$recno ;
+		$recno = $rec->{id} ;
+		}
+
+	my @sql = () ;
+	push @sql, [ $sql{intkey}->[0], $tied->{id} ] ;
+	push @sql, [ $sql{intkey}->[1], $recno ] ;
+	$tied->{dsn}->{index}->delete( @sql ) ;
+	return undef ;
+	}
+
 sub query {
 	my $self = shift ;
 	my $package = ref $self ;
 
+	my @key = () ;
+	push @key, [ shift @_ ] if @_ == 1 ;
+
 	my @nvp = () ;
+	push @nvp, @key ;
 	push @nvp, [ splice @_, 0, 2 ] while @_ ;
-	push @nvp, [] unless @nvp ;
 
 	my @error = grep @$_ && ! exists $self->{ $_->[0] }, @nvp ;
 	carp sprintf( "Unknown data definition %s", $error[0][0] )
-		and return () if @error ;
+			and return () if @error ;
+	my $archive = @nvp && $nvp[0][0] eq 'archive' ;
 
-	my $out = &{ $private{matching} }( $self, @{ shift @nvp } ) ;
+	my $all = &{ $private{matching} }( $self ) ;
+	my $out = @nvp == 0? $all:
+			&{ $private{matching} }( $self, @{ shift @nvp } ) ;
 	return $out unless ref $out ;
-	my @values = keys %{ { @$out } } ;
-	my $save = &{ $private{filter} }( \@values ) ;
+
+	$all ||= [] ;
+	my $save = &{ $private{filter} }( [ keys %{ { @$all } } ] ) ;
+	$save = $archive? [ keys %{ { @$out } } ]:
+			&{ $private{filter} }( $save, [ keys %{ { @$out } } ] )
+			if $out != $all ;
 
 	while ( @nvp ) {
-		$out = &{ $private{matching} }( $self, @{ pop @nvp } ) ;
-		@values = keys %{ { @$out } } ;
-		$save = &{ $private{filter} }( $save, \@values ) ;
+		$out = &{ $private{matching} }( $self, @{ pop @nvp } ) || [] ;
+		$save = &{ $private{filter} }(
+				$save, [ keys %{ { @$out } } ] ) ;
 		}
 
-	unless ( wantarray ) {
-		my %ashash = map { $_ => $_ } @$save ;
-		return bless [ $self, %ashash ], $package ;
-		}
+	return wantarray? @$save: 
+			bless [ $self, @$save ], $package
+			unless @key ;
 
-	return @$save ;
+	my %out = @$out ;
+	return map { $_ => $out{$_} } @$save ;
 	}
 
 sub DESTROY {}
@@ -550,16 +583,7 @@ sub AUTOLOAD {
 	use vars qw( $AUTOLOAD ) ;
 	my $func = $AUTOLOAD ;
 	$func =~ s/^${package}::// ;
-	return undef unless exists $self->{$func} ;
-
-	my $argct = scalar @_ ;
-	my $out = &{ $private{matching} }( $self, $func, @_ ) ;
-	return $out if defined $out && ! ref $out ;
-
-	$out ||= [] ;
-	my $asarray = bless [ $self, @$out ], $package ;
-	return $asarray unless wantarray ;
-	return $argct? $asarray->recordID: @$out ;
+	return exists $self->{$func}? $self->query( $func, @_ ): undef ;
 	}
 
 sub newobject {
@@ -597,9 +621,9 @@ NoSQL::PL2SQL::Simple - Implementation of NoSQL::PL2SQL
 
   my $collection = new MyArbitraryClass ;
 
-  ## Writing to the database
-  $collection->record( CGI->new->Vars ) ;	## Save user input
-  $collection->save( CGI->new->Vars ) ;	## save() is an alias
+  ## Writing to and modifying the database
+  $collection->save( CGI->new->Vars ) ;
+  $collection->delete( CGI->new->Vars->{recordid} ) ;
 
   ## Accessing the database
   @allemails = values %{ { $collection->contactemail } } ;
@@ -611,343 +635,427 @@ NoSQL::PL2SQL::Simple - Implementation of NoSQL::PL2SQL
 		graduationyear => '1989',
 		)->records ;
 
+
+=head1 NoSQL::PL2SQL::Simple VERSUS NoSQL::PL2SQL
+
+NoSQL::PL2SQL performs background persistence for perl objects using SQL and
+a relational database:  Persistence is enabled with a simple designation.
+Everything else happens automatically in the background.  As a result, 
+NoSQL::PL2SQL has practically no defined API.  So it is inadequate for
+users who are looking for an alternative to SQL (as in NoSQL).
+
+NoSQL::PL2SQL::Simple solves that problem and provides a complete API to
+access stored data.  In effect, these two modules perform a division of labor:
+NoSQL::PL2SQL is responsible for storing the data, and NoSQL::PL2SQL::Simple
+is responsible for access.
+
+The comparison is also dependent on the data architecture needs.
+
+=over 8
+
+=item Two-Dimensional Tabular Data
+
+Given that RDB's call their data containers I<tables>, the two-dimensional
+tabular data structure tends to dominate traditional data architecture.  
+While a table is visually easy to comprehend.  A more abstract model extends
+a one-dimensional array:  Where, instead of scalars, each array element is 
+a set of NVP's (name-value-pairs).  Two-dimensional data is tabular if each 
+NVP set shares a common set of names.  Non-tabular two-dimensional data 
+is still a tough fit for a conventional RDB.
+
+=item Multi-Dimensional Tabular Data
+
+A multi-dimensional table is best described in terms of a spreadheet, where 
+one cell contains a list (or any set).  The description is trickier in
+terms of an array of NVP's.  But these data types are getting more and more 
+common as CSV data representation starts to give way to XML and JSON.
+RDB's can handle complex data by using I<relational tables>.  (the I<R> in 
+I<RDB>.)  But RDB data definitions tend to have scaling problem as the data
+gets more and complex.
+
+=item Non-Tabular Data
+
+It's possible to cobble together an RDB solution for two-dimensional 
+non-tabular data.  But, beyond that, developers are entering a world of pain.
+In this realm, NoSQL::PL2SQL provides a clear advantage.
+
+=back
+
+NoSQL::PL2SQL is designed for non-tabular data where traditional RDB's are
+not very useful.  NoSQL::PL2SQL::Simple requires some form of tabular data,
+and combines the advantages of both NoSQL::PL2SQL and RDB SQL.
+
+
 =head1 DESCRIPTION
 
-NoSQL::PL2SQL is a low level abstract interface designed to be swapped into existing applications.  It's powerful, flexible, and not quite ready to roll out of the box.
+In a traditional RDB, the data structure definition is external, separate
+from the content data.  In NoSQL::PL2SQL::Simple, the two exist 
+side-by-side.  Both data content and definition have OO representations.  
 
-NoSQL::PL2SQL::Simple is an intermediate solution more appropriate for building out new applications.  It retains many of PL2SQL's features, particularly universal data schemas that can accomodate heterogeneous, indeterminate data elements. Additionally, NoSQL::PL2SQL::Simple allows data definition capabilities and provides a complete solution for data access.
+A data definition can be associated with any arbitrary perl class that 
+subclasses NoSQL::PL2SQL::Simple.  In many cases, the subclass is no more
+than a name that identifies the definition.  The data definition is 
+encapsulated in the class's instantiation or I<instance>.  (I'm using fairly 
+precise nomenclature.)  Many of NoSQL::PL2SQL::Simple's methods are called 
+via the instance (or container).
 
-NoSQL::PL2SQL::Simple's API consists of the following functions:
+Data content is encapsulated in class I<objects>.  Methods to access or
+modify data content are called via these objects.  Both objects and the 
+single instance  are blessed into the same class name.  Use appropriate 
+variable names to distinguish each in your code.
 
-=head3 Constructor
+=head2 Constructor
 
-C<new()> generally takes no arguments and returns an I<instance> of the data definition class.
+=head3 new()
 
-Classes that implement NoSQL::PL2SQL::Simple are usually referred to as I<data definition classes>.  Except this document recommends creating additional abstract subclasses called I<data source classes>.  Naturally, the properties of the instance returned by C<new()> reflect the data definition.
+According to the wisdom of OO pattern science, the I<constructor> is used
+to create the I<instance>.  And a I<factory> (generally applied to the 
+instance) is used to create the I<objects>.
 
-Perl OO, in its annoying flexibility, allows class overloading.  So as a convenient mapping of definition and data, objects stored in the database have the same class name.  An I<instance> that contains a data definition is distinguished from a data containing I<object>.
+=head3 db()
 
-It's appropriate for implementations to create methods that will only be applied to objects.  If so, they should probably override the C<new()> constructor (shown in the example under I<Developer's Notes>) to minimize potential confusion.
+C<new()> no arguments and returns an I<instance> of the data definition class.  As is typical in perl, the method C<NoSQL::PL2SQL::Simple::new()> is the 
+conventional constructor.  However, NoSQL::PL2SQL::Simple is invoked by 
+creating a subclass, which may need its own constructor.  Consequently, 
+the following two statements are equivalent:
 
-=head3 Data Access
+  $instance = NoSQL::PL2SQL::Simple->new ;
+  $instance = NoSQL::PL2SQL::Simple->db ;
 
-Most of NoSQL::PL2SQL::Simple's methods are heavily overloaded.  This approach makes the API easier to remember and minimizes namespace collisions.
-
-C<record()>, for example, has five variants:
-
-=over 8
-
-If its argument is an unblessed object, C<record()> is nearly identical to C<NoSQL::PL2SQL::SQLObject()> in that it simultanously blesses the object and writes it to the database.  Unlike C<NoSQL::PL2SQL::SQLObject()>, C<record()> returns a cloned object that must be explicitly re-saved.
-
-If its argument is a blessed object, C<record()> saves the object into the database.
-
-If its argument is an integer, C<record()> returns an object that was previously written into the database.
-
-If its argument is a blessed array, C<record()> is an alias for C<records()>, which returns a set of objects from the database.
-
-If there are two arguments, the first a blessed object and the second unblessed, C<record()> replaces the first object with the second.
-
-=back
-
-NoSQL::PL2SQL::Simple can be used to maintain the profile records of an access control list:
-
-  ## A new user registers by submitting a website form.  $userid contains
-  ## an automatic assignment, which should be returned as part of the
-  ## confirmation.
-
-  $userid = $collection->record( CGI->new->Vars )->SQLObjectID ;
-
-  ## If the user logs back in using the $userid, his/her record is
-  ## recovered as follows:
-
-  $userrecord = $collection->record( $userid ) ;
-
-  ## Suppose the user changes his/her password.  The change is saved as
-  ## follows:
-
-  $userrecord->{password} = $encrypted ;
-  $collection->record( $userrecord ) ;
-
-  ## If the website contains a profile editting form, then replace the 
-  ## entire record with the form data:
-
-  $collection->record( $userrecord, CGI->new->Vars ) ;
-
-C<recordID()> is a used to convert query results to record id's (otherwise known as object id's).
-
-C<SQLObjectID()> returns the object id automatically generated by C<NoSQL::PL2SQL>.
-
-C<keyValues()> establishes many-to-one and many-to-many relationships among objects, and has three variants:
+The instance has several functions:
 
 =over 8
 
-To add a relationships, pass one or more values as arguments to the C<keyValues()> method.
+=item As a data definition, with methods to alter the definition
 
-To list relationships, pass no arguments to the C<keyValues()> method.
+=item As a factory, with methods to create objects
 
-To clear all relationships, chain the c<keyValues()> method as follows: C<< $o->keyValues()->clear() >>.
-
-=back
-
-See the B<MANY-TO-ONE RELATIONSHIPS> section below.
-
-C<save()> is an alias for C<record()>.  Each of the pair of statements below are equivalent:
-
-  $collection->record( CGI->new->Vars ) ;
-  $collection->save( CGI->new->Vars ) ;
-
-  $collection->record( $userrecord ) ;
-  $userrecord->save() ;
-
-  $collection->record( $userrecord, CGI->new->Vars ) ;
-  $userrecord->save( CGI->new->Vars ) ;
-
-=head3 Data Queries
-
-C<query()> is used to query the database.  Its arguments are name-value-pairs (NVP's).  Multiple NVP's are combined using SQL B<AND> logic.  C<query()> normally returns an array of record id's.  In scalar context, its output can be chained to other methods as illustrated:
-
-  ## In the above example, the user recovers his/her userid by querying
-  ## an email address:
-
-  my $cgivars = CGI->new->Vars
-
-  my @userids = $collection->query( 
-			contactemail => $cgivars->{contactemail},
-			) ;
-  error( "Unknown email address" ) if @userids == 0 ;
-  error( "Duplicate email address" ) if @userids > 1 ;
-  my $userid = $userids[0] ;
-
-  ## Chain recordID to return a scalar instead of an array
-  $userid = $collection->query( 
-			contactemail => $cgivars->{contactemail} 
-			)->recordID ;
-
-  ## Allow the user to login using an email address
-  @userids = $collection->query( 
-			contactemail => $cgivars->{contactemail},
-			password => $encrypted,
-			) ;
-  error( "Login failed" ) unless @userids == 1 ;
-  my $user = $collection->record( $userids[0] ) ;
-  my $greeting = sprintf( "Hello %s", $user->{contactnamefirst} ) ;
-
-NoSQL::PL2SQL::Simple uses Perl's magical C<AUTLOAD()> to make simple queries more concise.  The premise of object oriented programming is that complexity is encapsulated inside a black box; and simplicity is exposed at the interface.  The premise of NoSQL::PL2SQL::Simple is that the code below is easy to read and maintain:
-
-  ## The output of query can be chained to return a set of objects
-  my @users = $collection->query( 
-		contactemail => $cgivars->{contactemail},
-		)->records ;
-
-  ## This statement can be rewritten using an AUTOLOAD alias
-  @users = $collection->contactemail( $cgivars->{contactemail} )->records ;
-  error( "Unknown email address" ) if @users == 0 ;
-  error( "Duplicate email address" ) if @users > 1 ;
-  my $response = sprintf "Hello %s,\nYour userid is: %d",
-		$users[0]->{contactnamefirst}, $users[0]->SQLObjectID ;
-
-  ## Without error checking, this code can be further simplified
-  ## In this case, record() aliases records() for readability.
-  $user = $collection->contactemail( $cgivars->{contactemail} )->record ;
-  $response = sprintf "Hello %s,\nYour userid is: %d",
-		$user->{contactnamefirst}, $user->SQLObjectID ;
-
-In this example, the C<contactemail()> method is not explicitly defined.  The magical C<AUTOLOAD()> essentially calls C<query()> using the method name as the first argument.
-
-C<AUTOLOAD()> aliases and C<query()> are slightly different.  The C<AUTOLOAD()> methods are overloaded to take zero or one argument(s).  C<query()> accepts a hash, or even numbered array, as arguments.
-
-If called without arguments, the C<AUTOLOAD()> methods return a hash of NVP's that correspond to the matching objects, keyed on object id.  Each NVP value represents the object element's value.
-
-  ## Allow users to log in using their name, selected from a combo box
-  ## 'username' must be part of the data definition
-  ## Note:  From a security standpoint, this is a poor practice
-
-  %users = $collection->username ;
-  
-  ## Build a combo box using the %users NVP
-  ## <select name="userid">
-  ##  <option value="$userskey">$usersvalue</option>
-  ## </select>
-  
-If called without arguments, C<query()> returns all the stored objects matching the data definition class.  This invocation is used with the C<reindex()> method as shown below.
-
-=head3 Class Definition
-
-A set of NoSQL::PL2SQL::Simple's methods are specifically used as part of the class definition, explained below.  
-
-=over 8
-
-C<addTextIndex()>
-
-C<addNumberIndex()>
-
-C<addDateIndex()>
+=item As a data source, with methods to query the data
 
 =back
 
-C<reindex()> updates the database to reflect data definition changes.  It requires a data element argument.  See the B<INDEXES> section below.
+All these methods are detailed in the following sections.
 
-=head1 DEFINING CLASSES
+=head2 Data Definition Methods
 
-Object oriented programming techniques improve code reuse and manage complexity.  For example, an object's behavior is determined by its class definition and its individual properties.  OO designers usually consider tradeoffs between class attributes and object properties.  Subclassing is a technique of assigning attributes to a group of objects so that identical properties don't need to be repetitively defined at instantiation.  Instead, properties are defined as attributes of a subclass instantiated by objects who share those properties.
+Tabular data is I<tabular> because each element (a data object) has a common
+structure. The entire data set can be laid on a grid with identifiable, 
+pre-defined column names.  Data elements are laid out as rows which can be 
+easily added or deleted.
 
-NoSQL::PL2SQL::Simple uses this approach to separate data definitions from its internal complexity.  Subclassing also ensures that every object is associated with a data definition, which can be accessed as a class instantiation.
+I use the term I<NVP set> (an associative array in perl) to generalize 
+these elements, and the term I<tabular> requires that each NVP set use 
+the same names.  It's helpful if the reader can visualize this more abstract
+model, because NoSQL::PL2SQL::Simple allows much more flexibility 
+(or variation) among each NVP, so the result can be much less tabular than
+data stored in a traditional RDB.
 
-=head3 Data Definition Subclass
+The difference is that in NoSQL::PL2SQL::Simple, only some names 
+(or columns or fields) need to be commonly defined within each element 
+(or object).  These names are determined by the data definition which are 
+properties of the instance described above.  
 
-NoSQL::PL2SQL::Simple is simple even for users who have never defined a class in Perl.  Only the following code is required to define a data definition subclass.  The BEGIN clause is good practice, but not necessary.
+As an example, consider an application that needs to save each user's session 
+state.  If the application is complex, with numerous interfaces, this data 
+is going to be quite unstructured as the state definition gets more 
+complicated.  Nevertheless, there are a handful of common elements, say:
+I<SessionID>, I<UserID>, I<Email>, and I<Password>.  Theoretically, this could
+be done within a strict tabular structure by marshalling the fuzzy stuff into
+a single BLOB value.  (Actually, this approach is not uncommon.)
 
-  ## This code defines a data definition class named 
-  ## 'TQIS::HighSchoolFriends'
-  ## The BEGIN clause is not strictly necessary
+  ## A simple application for saving a complex session
 
   BEGIN {
-	package TQIS::HighSchoolFriends ;
+	package TQIS::Session ;
 	use base qw( NoSQL::PL2SQL::Simple ) ;
 	}
-
-The actual data definition is built using the data definition methods described above.  This approach should be easier for users who have never written a class definition.  Using a Perl terminal, these statements are simpler than using command line SQL.  Otherwise, the code below could be written into a one-time throw-away script.  Or, using an appropriate Perl interpreter, the data definitions can be easily managed with a web-based tool.
-
-  ## Create another Data Definition Class for this example
-  BEGIN {
-	package TQIS::HighSchools ;
-	use base qw( NoSQL::PL2SQL::Simple )
-	}
-
-  ## TQIS::HighSchools contains only a list of schools.  This example
-  ## illustrates how to normalize data using NoSQL::PL2SQL::Simple
-  TQIS::HighSchools->new->addTextIndex( qw( highschool ) ) ;
-
-  ## Create an instance of the TQIS::HighSchoolFriends data definition
-  my $friends = new TQIS::HighSchoolFriends ;
-
-  ## Use the data definition methods to perform the actual data 
-  ## definition
-  $friends->addTextIndex( qw( yeargraduated lastname ) ) ;
-
-  ## A strictly normalized RDB would use a separate table to reflect
-  ## this relationship.  I find this simpler approach of using
-  ## internal references more durable: This spouse value will be the
-  ## record id of another HighSchoolFriend object.
-  $friends->addNumberIndex( qw( spouse ) ) ;
   
-  ## Normalizing means these highschool data values will be record
-  ## ids from the other data definition class.
-  $friends->addNumberIndex( highschool ) ;
+  $instance = TQIS::Session->new ;
+
+The data definition is itself an NVP set data object.  This is perl, so it's 
+accessed as a hash reference.
+
+  ## display the data definition
+
+  print join "\n", %$instance, '' ;
+
+I<hash reference>, I<associative array>, or I<NVP set> are interchangable
+terms.  Each name (or key) in this set is the same name required in each 
+data object (or element).  Each associated value is a data type.  The data
+types are intrinsic to NoSQ::PL2SQL::Simple, three are currently defined.
+There's a little magic under the hood, so the best way to add data 
+definitions are the following three methods:
+
+=head3 addTextIndex()
+
+=head3 addNumberIndex()
+
+=head3 addDateIndex()
+
+Here's how it's done in our example:
+
+  $instance->addNumberIndex( qw( UserID ) ) ;
+  $instance->addTextIndex( qw( Email Password ) ) ;
+
+In this example I<SessionID> will be an internal, automatically generated key.
+Since these definitions do not specify uniqueness, the code to enforce a
+unique I<UserID> is shown later in L<Unique Keys>.
+
+=head2 Factory Methods
+
+Generally, an I<instance> needs a data definition before it's available for 
+factory methods.
+
+=head3 record()
+
+As described above, the constructor creates an I<instance> that represents 
+the data definition.  Data I<objects> are created using a factory method 
+applied to the instance.  C<record()> is that factory method.  Because of
+this special significance, it is heavily overloaded.
+
+  $session = { ... } ;		## A tabular data object
+  $sessionid = 231 ;		## An assigned id I made up
+
+  $object = $instance->record( $session ) ;	## Returns an object copy
+  $object = $instance->record( $sessionid ) ;	## Returns the stored object
+  $object = $instance->record( 
+		$sessionid => $session ) ;	## overwrites a stored object
+
+The same C<record()> factory method is used to read, write, or overwrite a
+data object, depending on the arguments.  Naturally, developers can create
+conventional C<read()> and C<write()> methods in a subclass.
+
+As a factory, C<record()> is always called via the instance.
+
+=head2 Query Methods
+
+Earlier, I compared NoSQL::PL2SQL::Simple to a solution that marshalls the
+non-tabular data into a single BLOB value.  NoSQL::PL2SQL::Simple does
+not perform any marshalling, so the resulting data storage is more accessible
+and portable.  But it should be obvious that the data marshalled into the 
+BLOB is not available for querying or searching.  And this limitation also
+applies to NoSQL::PL2SQL::Simple.
+
+Since the query operations are tightly bound to the data definition, it 
+follows that the query methods are called on the instance.
+
+=head3 query()
+
+Reading and writing data objects does not require a very complicated API.  
+(NoSQL::PL2SQL has practicallyj none).  The power and complexity of 
+NoSQL::PL2SQL::Simple lies in its query capabilities.  So this section 
+will be more detailed.  Most of the API consists of a single method, 
+C<query()>.  Naturally, this method is overloaded, so several variations
+are described.
+
+=head3 AUTOLOAD()
+
+Additionally, C<query()> is aliased by C<AUTOLOAD()>.  AUTOLOAD is not 
+necessarily a universally loved perl feature, but it can improve code
+readability.  
+
+=head3 recordID() ;
+
+Since NoSQL::PL2SQL::Simple doesn't inherently support unique keys, all 
+query methods return an array.  C<recordID()> is available when you 
+absolutely positively need a single scalar.
+
+  @match = $instance->query( Email => 'jim@tqis.com' ) ;
+  @match = $instance->Email('jim@tqis.com') ;		## AUTOLOAD equivalent
+
+  warn "entry not found" unless @match ;
+  warn "duplicate entries found" if @match > 1 ;
+
+  $sessionID = $match[0] ;
+  ## single scalar requirement
+  $sessionID ||= $instance->query( Email => 'jim@tqis.com' )->recordID ;
+
+  $session = $instance->record( $sessionID ) ;
+
+This example demonstrates several concepts:  First, the definition name can be 
+used as though it were a method definition, thus omitting the first argument.
+Second, C<$sessionID> is an automatically generated unique key that is 
+required to use the C<record()> factory method.  NoSQL::PL2SQL::Simple
+includes an idiom that is a little cleaner.
+
+  @session = $instance->query( Email => 'jim@tqis.com' )->records ;
+  @session = $instance->Email('jim@tqis.com')->records ;	## AUTOLOAD
+
+  warn "entry not found" unless @session ;
+  warn "duplicate entries found" if @session > 1 ;
+
+  $session = $sessions[0] ;
+  $session = $instance->query( Email =>'jim@tqis.com' )->record ;
+  $session = $instance->Email('jim@tqis.com')->record ;		## AUTOLOAD
+
+C<query() can support more than one qualifier.  This use has no AUTOLOAD 
+equivalent.
+
+  @session = $instance->query( 
+		Email => 'jim@tqis.com, 
+		Password => 'in80gres' )->records ;
+
+  warn "invalid login" unless @session ;
+  warn "contact system adminstrator" if @session > 1 ;		## uh-oh
+
+  ## query()'s "and" logic is built in.  
+  ## Roll your own "or" logic as follows:
+
+  @results = $instance->query( Email => 'jim@tqis.com' ) ;
+  push @results, $instance->query( Password => 'in80gres' ) ;
+  %results = map { $_ => 1 } @results ;		## filter duplicates
+  @results = keys %results ;
+
+If C<query()> is called with no arguments, the entire data set is returned.
+This invocation is typically used to rebuild after changing the data 
+definition.
+
+  @keys = $instance->query ;
+  @everything = $instance->query->records ; 	## memory intensive
+
+When passed with a single argument, C<query()> behaves similarly, except
+each element's key is accompanied by its associated NVP value. 
+
+  %email = $instance->query('Email') ;
+  %email = $instance->Email ;			## AUTOLOAD equivalent
+
+  print "select your email address from below\n" ;
+  printf "%d\t%s\n", @ea while @ea = each %email ;
+
+  ## an even more ludicrous example:
+
+  %passwords = $instance->query('Password') ;
+  @email = $instance->query( Email => CGI->new->Vars->{email} ) ;
+
+  print "select your password from below\n" ;
+  map { printf "%s\n", $passwords{$_} } @email ;
+
+Many of these extended query options are designed to access data with 
+minimal time and resources. 
+
+=head2 Object Methods
+
+Perl objects data can usually do not require accessor methods.  For
+an object consisting of NVP's, data is accessed as follows:
+
+  $value = $object->{name} ;
+
+Developers are expected to subclass NoSQL::PL2SQL::Simple, and so may elect 
+to write their own accessors.  
+
+NoSQL::PL2SQL::Simple stores and returns an object identical to what was
+originally saved.  But there are hidden properties (taking advantage of
+perl's TIE feature) that require accessors, for example C<SQLObjectID>.
+
+=head3 SQLObjectID()
+
+The C<SQLObjectID()> method is inherited from NoSQL::PL2SQL, and returns the
+objects unique internal key:
+
+  $sessionID = $object->SQLObjectID ;
+
+=head3 save()
+
+=head3 delete()
+
+These methods are aliases for instance methods:
+
+  $instance->record( $object->SQLObjectID, $object ) ;	## not very elegant
+  $object->save ;					## terse alternative
   
-  ## The data definition is reflected in the properties of the
-  ## class instantiation
-  print join "\n", %$friends ;
+  $instance->delete( $object->SQLObjectID ) ;
+  $object->delete ;					## equivalent
 
-  ## __END__
-  ## Throwaway setup script ends here
+NoSQL::PL2SQL::Simple has many shortcuts, but be careful
 
-  ## This remaining code is considered runtime.  For example, this
-  ## code would be run to create a web form to add new (or modify)
-  ## HighSchoolFriends objects
-  %schools = TQIS::HighSchools->new->highschool ;
+  $o = bless {}, ref $instance ;
+  $o->save ; 				## This won't work!
 
-  ## Populate a web form dropdown with the %schools set, eg:
-  ## <select name="highschool">
-  ##   <option value="210">Pioneer High School</option>
-  ## </select>
+  ## This would work
+  defined $o->SQLObjectID? $o->save: $instance->save( $o ) ;
 
-  ## Runtime code showing queries using this data definition
+  ## But obviously simpler
+  $instance->save( $o ) ;
 
-  ## This statement chains the constructor with an implicit query
-  ## and converts the result to a scalar.
-  my $phs = TQIS::HighSchools->new->highschool(
-		'Pioneer High School')->recordID ;
+perl's I<bless> feature adds lots of magical capabilities to a reference,
+and its I<TIE> feature adds even more.  As shown, the C<SQLObjectID()> 
+method returns undefined for untied objects.  But the recommended approach 
+is to avoid explicitly calling C<bless()> at all.  NoSQL::PL2SQL always 
+blesses tied objects, which avoids the possibility of blessed untied objects.
 
-  ## A more robust solution is to select the school from a list
-  ## Naturally, this works better using a mechanism such as 
-  ## a web form combo box
-  my %schools = TQIS::HighSchools->new->highschool ;
-  my %inverse = reverse %schools ;
-  $phs = $inverse{'Pioneer High School'} ;
+=head3 reindex()
 
-  ## Incidentally, all these statements will blow up.  Don't try them.
-  # $phs = TQIS::HighSchools->new->highschool->{'Pioneer High School'} ;
-  # $phs = TQIS::HighSchools->new->{highschool}->{'Pioneer High School'} ;
-  # $phs = TQIS::HighSchools->new->highschool('Pioneer High School') ;
+As described, one use of the C<query()> method is to reindex all the 
+records, or synchronizing the index table to reflect the data table.  
+This process is necessary whenever something is added to the
+data definition.  C<reindex()> does not take multiple arguments.
 
-  ## The actual query statements
-  my @pioneerfriends = $friends->highschool( $phs )->records ;
+  ## This brute force solution wastes many resources on
+  ## pointless reading and writing
 
-  or
+  map { $instance->record( $_ )->save } $instance->query ;
 
-  my @classmates = $friends->query( 
-		highschool => $phs,
-		yeargraduated => '1989',
-		)->records ;
+  ## This alternative modifies the specific index entry for
+  ## each record.
+  ## This operation must be repeated for each new data definition
 
-The data definition only needs to define object properties that will be queried.  See the B<INDEXES> section below.
+  map { $instance->record( $_ )->reindex('contactemail') } $instance->query ;
 
-The definition may also include an I<archive> element.  (Object elements named archive will be ignored.)  The I<archive> data definition prevents object data from being deleted.  Instead, when a record is replaced, the original record is assigned a new object id; and the replacement is inserted into the database with the value of the existing object id. 
+=head3 keyValues()
 
-  ## Create a new data definition subclass
-  BEGIN {
-	package TQIS::GPRC::Members ;
-	use base ( NoSQL::PL2SQL::Simple ) ;
-	}
+Under the hood, NoSQL::PL2SQL::Simple is primarily NoSQL::PL2SQL with an
+indexing subsystem included.  Most of the indexing is transparent.  However,
+The C<keyValues()> method is used to manipulate the index directly.  This
+method needs to be used to maintain many-to-many data relationships.
 
-  ## Create an instantiation
-  my $members = new TQIS::GPRC::Members ;
+Naturally, C<keyValues()> is overloaded, but its use is strightforward.  The
+method requires at least one argument, the name (or column or key).
 
-  ## Create a new member from webform data 
-  my $memberid = $members->record( CGI->new->Vars )->SQLObjectID ;
+  ## The session object has been redefined to include groups.  
+  ## A user may be in several groups.
+  ## Start by modifying the data definition
 
-  ## An application may email the $memberid as a confirmation.
-  ## Later on, the $memberid may be used to replace the member
-  ## data with something else
-  $members->record( $memberid )->save( CGI->new->Vars ) ;
+  $instance->addNumberIndex( qw( GroupID ) ) ;
 
-  ## The new data is returned by default
-  my $member = $members->record( $memberid ) ;
+  ## Hypothetically extract a list of groups.  Google App data is 
+  ## similarly structured.
 
-  ## Code to return the original data
-  my @archive = $members->archive( $memberid )->records ;
-  $member = $archive[-1] ;	## returned set is chronological
+  $object = $instance->record( $sessionID ) ;
+  @groups = map { $_->{id} } @{ $object->{Groups} } ;
+  $object->keyValues( GroupID => @groups ) ;
 
-=head3 Data Source Subclass
+  print "List of Groups:\n" ;
+  print join "\n", $object->keyValues('GroupID'), '' ;
 
-Unfortunately, none of the examples presented so far will actually run.  Like any database interface, NoSQL::PL2SQL::Simple needs an actual database.  Advanced users should create an abstract Data Source subclass, described below.  Other users will need to define data sources and pass them to the constructors of each data definition.
+In this particular example, state data will be constantly updated.  
+Unfortunately, C<keyValues()> always needs to be explicitly called.  So
+all of the following code is now required to save session data:
 
-NoSQL::PL2SQL::Simple uses its own version of DBI, NoSQL::PL2SQL::DBI.
-NoSQL::PL2SQL::DBI contains the methods to generate the specific SQL.  NoSQL::PL2SQL::DBI subclasses are used to handle discrepencies in the SQL syntax.  
+  $sessiondata = ... ; 	## unblessed, untied raw data
+  $object = $instance->save( $sessionID, $sessiondata ) ;
+  @groups = map { $_->{id} } @{ $object->{Groups} } ;
+  $object->keyValues('GroupID')->clear ;
+  $object->keyValues( GroupID => @groups ) ;
 
-NoSQL::PL2SQL is based on a single table which can be shared across multiple implementations.  As in the NoSQL::PL2SQL documentation examples, it's commonly called $dsn.
 
-NoSQL::PL2SQL includes implementations for SQLite and MySQL.  These examples use SQLite, which comes preinstalled.
+=head1 DATA SOURCE CLASSES
 
-  ## define a data source
-  use NoSQL::PL2SQL::DBI::SQLite ;
-  my $dsn = new NoSQL::PL2SQL::DBI::SQLite $tablename = 'objectdata' ;
-  $dsn->connect( 'dbi:SQLite:dbname=:memory:', '', '') ;
+NoSQL::PL2SQL uses a single table to store arbitrarily structured data.  
+There is no need to create different tables for different types of objects.
+Although NoSQL::PL2SQL::Simple requires a pair of tables, the data structure 
+definition is independent of these tables, so one pair of tables can be used 
+for numerous implementations.  In fact, a completely normalized database 
+can be built without using separate tables.
 
-  ## NoSQL::PL2SQL::Simple queries actually require a second DSN
-  my $index = $dsn->table('querydata') ;
+For simplicity, the previous examples had no code that defines the
+data source.  To keep things simple, subclass NoSQL::PL2SQL::Simple
+in a separate I<Data Source Class> and define the data source there.
 
-  ## run once and only once
-  NoSQL::PL2SQL::Simple->loadschema( $dsn, $index ) ;
-
-  ## The DSN objects are passed to the constructor
-  my $members = new TQIS::GPRC::Members $dsn, $index ;
-
-  ## The DSN objects can also be shared among all the implementations
-  ## we've used in our examples
-
-  my $collection = new MyArbitraryClass $dsn, $index ;
-  my $friends = new TQIS::HighSchoolFriends $dsn, $index ;
-
-In order to use the last two statements, we would need to redefine the DSN objects every time we instantiate another data definition subclass.  The resulting code is much less concise than the examples.
-
-The solution is to define an abstract I<data source> subclass.  The code is simple enough to cut and paste from the example below.  But in order to work, this class must be an appropriately named file that can be found using C<@INC>.  For newer users, this might be a good opportunity to learn more about Perl OO programming.
-
-  package TQIS::PL2SQL::DSN
+  package TQIS::PL2SQL::MyData ;		## An arbitrary class name
   use base qw( NoSQL::PL2SQL::Simple ) ;	## Do not change this line
 
-  use NoSQL::PL2SQL::DBI::SQLite ;
+  use NoSQL::PL2SQL::DBI::SQLite ;		## Use one of the available
+						## drivers.
 
   my @dsn = () ;				## Do not change this line
 
@@ -955,184 +1063,137 @@ The solution is to define an abstract I<data source> subclass.  The code is simp
   sub dsn {
 	return @dsn if @dsn ;			## Do not change this line
 
-	push @dsn, new NoSQL::PL2SQL::DBI::SQLite 'objectdata' ;
+	my %tables ;
+	$tables{objectdata} = 'aTableName' ;	## Personal preference
+	$tables{querydata} = 'anotherTableName' ;	## Ditto
+
+	push @dsn, new NoSQL::PL2SQL::DBI::SQLite $tables{objectdata} ;
 	$dsn[0]->connect( 'dbi:SQLite:dbname=:memory:', '', '') ;
 
-	push @dsn, $dsn[0]->table('querydata') ;
+	push @dsn, $dsn[0]->table( $tables{querydata} ) ;
 	return @dsn ;				## Do not change this line
 	}
 
-  1 ;
+  ## Each of the following classes can have independent data structure
+  ## definitions.  After data definition, the classes below can be used
+  ## without additional code.
 
-Once complete, the data definition subclasses are very easy to declare:
+  package MyArbitraryClass ;
+  use base qw( TQIS::PL2SQL::MyData ) ;
 
-  BEGIN {
-	package MyArbitraryClass ;
-	use base qw( TQIS::PL2SQL::DSN ) ;
+  package TQIS::HighSchools ;
+  use base qw( TQIS::PL2SQL::MyData ) ;
 
-	package TQIS::HighSchools ;
-	use base qw( TQIS::PL2SQL::DSN ) ;
+  package TQIS::HighSchoolFriends ;
+  use base qw( TQIS::PL2SQL::MyData ) ;
 
-	package TQIS::HighSchoolFriends ;
-	use base qw( TQIS::PL2SQL::DSN ) ;
+  package TQIS::GPRC::Members ;
+  use base qw( TQIS::PL2SQL::MyData ) ;
 
-	package TQIS::GPRC::Members ;
-	use base qw( TQIS::PL2SQL::DSN ) ;
-	}
+This sample code can be written into a single file and installed in perl's 
+class path.  However, before proceeding, make sure to run the following 
+installation code:
 
-  ## Run once and only once
-  TQIS::PL2SQL::DSN->loadschema() ;
+  use TQIS::PL2SQL::MyData ;
 
-  ## Each of these statements should now succeed
-  my $o = new MyArbitraryClass ;
-  my $schools = new TQIS::HighSchools ;
-  my $friends = new TQIS::HighSchoolFriends ;
-  my $members = new TQIS::GPRC::Members ;
+  TQIS::PL2SQL::MyData->loadschema ;
 
-=head1 INDEXES
 
-I<Should this section be named INDICES?>
+=head1 OTHER FEATURES
 
-Typically, RDB data is indexed directly on the data set.  NoSQL::PL2SQL::Simple indexes a second table that contains references to the first table.  The biggest drawback to this approach is that records must be explicitly added and deleted from this second table.  Happily, this additional complexity is automatically handled whenever records are added or modified.  Provided the class definition is completed before object data is inserted, this approach should not affect anyone using NoSQL::PL2SQL::Simple.
+=head2 Index Mapping
 
-However, a little housekeeping is required to modify an existing data set:
+In its earliest incarnations, this module was used to store form data 
+submitted from website forms.  At one time, these forms were created by 
+Adobe DreamWeaver, where the form fields were renamed everytime the form 
+was updated.  The resulting hack remains, and is described here as
+I<Index Mapping>.
 
-  my $friends = new TQIS::HighSchoolFriends ;
-  $friends->addTextIndex('contactemail') ;
+A more hypothetical situation is that the data is updated by users who 
+submit a spreadsheet.  Upon submission, each spreadsheet row is added as
+a new record, using the definition in the column headers.  After some
+successful period of production, suddenly one of the column names is
+changed from I<Email> to I<ContactEmail>.
 
-  ## This solution is inefficient, but comprehensive
-  map { $friends->record( $_ )->save } $friends->query ;
+  ## First solution:  Change the code
+  ## Find all occurences of "save()" or "record()" equivalents, and 
+  ## change as follows:
 
-  ## Alternatively, use this sequence, which must be 
-  ## repeated for each new element definition
-  map { $friends->record( $_ )->reindex('contactemail') } 
-			$friends->query ;
+  $instance->record( CGI->new->Vars, ContactEmail => 'Email' ) ;
+  $instance->save( CGI->new->Vars, ContactEmail => 'Email' ) ;
 
-In order to implement NoSQL::PL2SQL's support for indeterminate objects, the class data definition may be completely independent of the object data.  This approach requires explicit mapping, but can be useful:
+  ## Alternate solution:  Change the data definition
+  $instance->addTextIndex( qw( ContactEmail ) ) ;
+  map { $instance->record( $_ )->reindex( Email => ContactEmail )
+			$instance->query ;
 
-  my $members = new TQIS::GPRC::Members ;
-  $members->addTextIndex('byemail') ;
-  
-  ## add a new member
-  $members->record( CGI->new->Vars, 
-		workemail => 'byemail', homeemail => 'byemail' ) ;
+The second solution is probably more maintainable, except that the data 
+definition has become cluttered.  The ultimate fix requires some 
+understanding of the NoSQL::PL2SQL innards, but it looks like this:
 
-  ## This approach creates two records in the index table (three if 
-  ## there's an explicit byemail form field), and improves the
-  ## data access capabilities as follows:
+  my $datadef = NoSQL::PL2SQL::SQLObject( 
+		ref( $instance ),
+		$instance->dsn->[0], 0 ) ;
+  delete $datadef->{Email} ;
+  undef $datadef ;
 
-  ## Both these statements work
-  my $jim = $members->byemail('jim@work.tqis.com')->record ;
-  $jim = $members->byemail('jim@home.tqis.com')->record ;
+I<Index Mapping> is also useful for a similar problem.  EG., in a contact
+manager, the input data may specify a I<Work Email>, I<Home Email>, 
+and I<Other Email>.  When a user is queried by email, it shouldn't matter 
+where that address was originally entered.  The answer is similar to the 
+I<First Solution> in the previous example.
 
-  ## this approach must be implemented consistently
-  $jim->save( CGI->new->Vars, workemail => 'byemail', homeemail => 'byemail' ) ;
+  $instance->addTextIndex( qw( Email ) ) ; 	## Ideally during installation
 
-  ## reindexing also allows mapping:
-  map { $members->record( $_ )->reindex( workemail => 'byemail' ) }
-		$members->query ;
-  map { $members->record( $_ )->reindex( homeemail => 'byemail' ) }
-		$members->query ;
+  $instance->save( CGI->new->Vars,
+		'Work Email' => 'Email',
+		'Home Email' => 'Email', 
+		'Other Email' => 'Email'
+		) ;
 
-=head1 MANY-TO-ONE RELATIONSHIPS
+=head2 Archiving Records
 
-Most of the time, database records can be accessed using a one-to-many
-relationship.  For example, a calendar application would primarily consist of I<event objects> whose elements include a single date, say February 14.  Many events can share that date, so when I<February 14> is queried, all the matching events can be displayed.
+NoSQL::PL2SQL has a feature called incremental updates:  Whenever an object
+is modified, only the modifications are written to the data source.  This 
+feature is not included in NoSQL::PL2SQL::Simple.  When an object is updated, 
+the old data is deleted and the replacement is written as new data.  From 
+a performance standpoint, it's slightly faster simply to write out new data, 
+at the expense of increased data storage requirements.  But if data storage 
+isn't an issue, NoSQL::PL2SQL::Simple can act like a time machine archiving 
+each version of stored data.
 
-NoSQL::PL2SQL::Simple handles all of these relationships automatically.  If the object's date is changed to February 17, the correspondence from February 14 is automatically broken and all future queries will return expected results.
+This feature can be easily turned on using the following data definition:
 
-This example, which assumes that events only correspond to a single date, represents a one-to-many relationship.  Eg, one date corresponds to many events.  In a more complicated data model, events can correspond to many dates, if the event occurs repeatedly or spans more than one day.  This more complicated model is called many-to-many: multiple objects per key and multiple keys per object.
+  $instance->addNumberIndex( qw( archive ) ) ;	## on installation
 
-NoSQL::PL2SQL::Simple automates the multiple objects per key functionality; but handling multiple keys per object requires explicit management using the C<keyValues()> method.  In a web-based calendar, the defined properties might be the record owner and location (zipcode).  If event entries always correspond to a single date, then the date will also be a defined property.  NoSQL::PL2SQL::Simple automatically manages queries for defined properties.
+  @history = $instance->archive( $sessionID )->records ;	## at runtime
 
-If the event can correspond to many dates, the web interface becomes more complicated.  This codes demonstrates several different scenarios:
+Ultimately, the I<archive> feature isn't quite so efficient because additional
+write operations are performed to insure that the C<$sessionID> value remains
+constant.
 
-  my $events = new mycalendar::event ;		## $events is an instance
-  print $events->{eventdate}, "\n" ;		## prints: I<datekey>
-  my $event = $events->record( CGI->new->Vars ) ;	## $event is an object
 
-  ## One scenario is that the interface returns a set of dates
-  ## such as a string containing many separated dates.
-  my @dates = split /,/, $event->{datelist} ;
-  $event->keyValues( eventdate => @dates ) ;	## add the set of dates
+=head1 IMPLEMENTATION EXAMPLES
 
-  ## In this scenario, when the record is edited, simply replace the
-  ## set of dates:
-  $event->keyValues('eventdate')->clear() ;	## clear the existing set
-  $event->keyValues( eventdate => split /,/, CGI->new->Vars->{datelist} ) ;
+Most of this section is still under construction.  
 
-  ## Another scenario is an interface worksheet that adds dates one at a time
-  $event->keyValues( eventdate => CGI->new->Vars->{nextdate} ) ;
 
-  ## The named property I<nextdate> must be distinct from the named
-  ## property I<eventdate> to prevent automatic key management
+=head2 Unique Keys
 
-  ## Repeat this process everytime a new date is added.  The interface should
-  ## prevent a duplicate date selection
-  $event->keyValues( eventdate => CGI->new->Vars->{nextdate} ) ;
+The example at the beginning of this document discussed an application that
+uses NoSQL::PL2SQL::Simple to save state data.  This application relies on
+an externally supplied UserID that must be unique.  This code ensures
+that uniqueness.
 
-  ## The interface should allow users to delete date selections
-  my $delete = CGI->new->Vars->{deletedate} ;
-  my @replace = grep $_ ne $delete, $event->keyValues('eventdate') ;
-  $event->keyValues('eventdate')->clear() ;
-  $event->keyValues( eventdate => @replace ) ;
+  $instance = TQIS::Session->new ;
+  $sessiondata = ... ; 	## unblessed, untied raw data
 
-=head1 DEVELOPERS NOTES
+  @args = $sessionID? ( $sessionID ):
+		$instance->UserID( $sessiondata->{UserID} ) ;
+  $instance->save( @args, $sessiondata ) ;
 
-If you're planning to write an implementation of NoSQL::PL2SQL, take a look at I<samples/pl2sql/comments.pl> in the distribution package.  NoSQL::PL2SQL::Simple is intended to be simple only from the point of view of its interface.
 
-If you're interested in writing OO modules, this module is unusually deliberate and worth noting.
-
-First, the module contains several private methods: C<update()>, C<recno()>, C<filter()>, C<index()>, C<matching()>, and C<indexmap()>.  These methods may disappear in future versions, or require changes where they're called.  So these methods are out of bounds.  Also, since NoSQL::PL2SQL::Simple is intended for subclassing, the number of base methods should be deliberately small to minimize namespace conflicts.  The source code illustrates how to defined these private methods.
-
-Second, I normally would not write a C<new()> constructor- most implementations will want to override the constructor.  But in the interest of a simple API, I prefer constructors with no arguments.  So the C<new()> method is used to generate an I<instance>, which in turn uses C<record()> to create I<objects>.  This approach may be insufficiently robust.
-
-Perl OO generally consists of blessed data structures.  Once blessed, a data structure is associated with specific class methods that can make assumptions about that data.  NoSQL::PL2SQL::Simple is a bit more complicated.  But advanced users may want their data definition classes to include this functionality and define additional class methods.  They should also rename the constructor.
-
-These users should be familiar enough with Perl OO to implement an abstract data source subclass.  One is defined above and used in this example:
-
-  package TQIS::MyAdvancedClass ;
-  use base qw( TQIS::PL2SQL::DSN ) ;
-
-  ## Rename the constructor to dataDefinition()
-  sub dataDefinition {
-	my $package = shift ;
-	return bless NoSQL::PL2SQL::Simple::new( $package, @_ ),
-			$package ;
-	}
-
-  ## Create a default constructor that returns an object instead 
-  ## of an instance.  Replace the generic code with something useful.
-  sub new {
-	my $package = shift ;
-	return bless {}, $package ;
-	}
-
-  ## Create methods intended for objects, not instances.  This one
-  ## prints out a mailing label from a contact record.
-  sub mailingLabel {
-	my $self = shift ;
-	return join '', $self->{name}, "\n",
-			$self->{address}, "\n",
-			$self->{city}, ' ', 
-			$self->{state}, '  ',
-			$self->{zipcode}, "\n" ;
-	}
-
-  ## __END__
-
-  ## Here's how the class might be used:
-
-  use TQIS::MyAdvancedClass ;
-
-  my $contacts = TQIS::MyAdvancedClass->dataDefinition ;
-  print $contacts->email('jim@tqis.com')->record->mailingLabel ;
-
-Third, NoSQL::PL2SQL::Simple uses private properties to avoid potentially overwriting user data.
-
-Using Data::Dumper on both an unblessed structure and its corresponding blessed object might indicate that the two are equivalent.  In fact, the blessed object has additional private properties.  For example, the object id property can only be accessed using the C<SQLObjectID()> method.  Private properties in Perl OO can share a name assigned to a public property without conflict.  
-
-=head2 EXPORT 
+=head1 EXPORT 
 
 None by default.
 

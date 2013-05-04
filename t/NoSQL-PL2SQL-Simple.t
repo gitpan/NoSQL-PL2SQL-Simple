@@ -352,7 +352,6 @@ $employees = new TQIS::Employees ;
 $id = $schueler[0]->SQLObjectID ;
 
 @ok = $schueler[0]->keyValues('dependents') ;
-warn "\n TQIS ", $ok[0] ;
 is( @ok => 0 ) ;
 
 $schueler[0]->keyValues( dependents => qw( Eva Hans Clara ) ) ;

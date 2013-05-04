@@ -6,9 +6,9 @@ WriteMakefile(
     NAME              => 'NoSQL::PL2SQL::Simple',
     VERSION_FROM      => 'lib/NoSQL/PL2SQL/Simple.pm', # finds $VERSION
     PREREQ_PM         => {
-			NoSQL::PL2SQL => 1.14,
+			NoSQL::PL2SQL => 1.21,
 			}, # e.g., Module::Name => 1.1
     ($] >= 5.005 ?     ## Add these new keywords supported since 5.005
       (ABSTRACT_FROM  => 'lib/NoSQL/PL2SQL/Simple.pm', # retrieve abstract from module
-       AUTHOR         => 'root <root@tqis.com>') : ()),
+       AUTHOR         => 'Jim Schueler <jim@tqis.com>') : ()),
 );

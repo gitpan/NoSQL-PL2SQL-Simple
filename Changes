@@ -14,3 +14,8 @@ Revision history for Perl extension NoSQL::PL2SQL::Simple.
 0.21  Tue Mar  5 19:35:02 EST 2013
 	- Added newobject() method and modified constructor
 	  to accomodate changes in NoSQL::PL2SQL.
+
+0.22  Fri May  3 19:46:28 EDT 2013
+	- Added delete() method
+	- Rewrote documentation (should be coherent now)
+
