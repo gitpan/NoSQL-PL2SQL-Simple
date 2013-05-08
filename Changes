@@ -26,3 +26,9 @@ Revision history for Perl extension NoSQL::PL2SQL::Simple.
 	- keyValues()->clear() can now be called with an argument
 	- Added CAVEATS to documentation
 
+0.24  Wed May  8 16:34:58 EDT 2013
+	- The following two statements should work identically:
+	     $instance->record( $object => $newobject )
+	     $instance->record( $object->SQLObjectID => $newobject )
+
+	  Refactored (using recursion) the record() method

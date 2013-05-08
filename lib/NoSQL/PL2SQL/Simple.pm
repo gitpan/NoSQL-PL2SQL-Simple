@@ -19,7 +19,7 @@ our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } ) ;
 our @EXPORT = qw(
 	) ;
 
-our $VERSION = '0.23' ;
+our $VERSION = '0.24' ;
 
 use Scalar::Util ;
 use base qw( NoSQL::PL2SQL ) ;
@@ -364,21 +364,25 @@ sub record {
 	&{ $private{update} }( $self ) ;
 
 	my @args = ( shift @_ ) ;
-	push @args, ( shift @_ ) if @_ && ref $_[0] ;
-	push @args, undef ;
+	push @args, ( @_ && ref $_[0] )? shift @_: undef ;
 	my ( $objectid, $value ) = 
 			ref $args[0]? ( undef, $args[0] ): @args[0,1] ;
 
-	my $vv = tied %$value if $value && ref $value eq ref $self ;
-	my $update = ! defined $objectid ;
-	$#args = 0 if defined $objectid ;
-	$objectid = $vv->{id} if defined $vv && exists $vv->{id} ;
-
+	my $argid = $objectid ;
 	my $dsn = $tied->{dsn}->{object} ;
 	my $index = $tied->{dsn}->{index} ;
+	my $out = {} ;
 
-	my $lastvalue ;
-	my $out = $vv || {} ;
+	if ( ! defined $objectid && $value
+			&& ref $value eq ref $self
+			&& $value->SQLObjectID ) { 
+		$objectid = $value->SQLObjectID ;
+
+		return $self->record( $objectid, $args[1], @_ ) 
+				if defined $args[1] ;
+		$out = tied %$value ;
+		}
+
 	my %index = @_ ;
 	my @index = () ;
 	if ( $value ) {
@@ -390,27 +394,22 @@ sub record {
 				keys %$self ;
 		}
 
-	while ( defined $value ) {
-		unless ( defined $objectid ) {
-			$lastvalue = $package->SQLObject( $dsn, $value ) ;
-			last ;
-			}
+	while ( defined $value && defined $objectid ) {
+		my $archive = $self->{archive}?
+				$package->SQLClone( $dsn, $objectid ):
+				undef ;
 
-		$update = 1 ;
 		$index->delete( [ objectid => $objectid ] ) ;
 
-		my $archive = $package->SQLClone( $dsn, $objectid )
-				if $self->{archive} ;
-
-		if ( defined $args[1] ) {
-			delete $out->{clone} ;
-			$dsn->delete( [ objectid => $objectid ] ) ;
-			$out->{clone} = $package->SQLObject( 
-					$dsn, $objectid, $args[1] 
-					) ;
+		if ( $out->{clone} && ! defined $argid ) {
+			&{ $private{sqlsave} }( $out->{clone} ) ;
 			}
 		else {
-			&{ $private{sqlsave} }( $out->{clone} ) ;
+			delete $out->{clone} ;
+			$dsn->delete( [ objectid => $argid ] ) ;
+			$out->{clone} = $package->SQLObject( 
+					$dsn, $argid, $value
+					) ;
 			}
 
 		last unless defined $archive ;
@@ -423,11 +422,17 @@ sub record {
 				[ intvalue => $objectid ],
 				[ objectid => $archiveid ]
 				) ;
+
 		last ;
 		}
 
 	delete $out->{clone} ;
-	$out->{clone} = $lastvalue || $package->SQLObject( $dsn, $objectid ) ;
+	$out->{clone} = defined $objectid? 
+			  $package->SQLObject( $dsn, $objectid ):
+			defined $value?
+			  $package->SQLObject( $dsn, $value ):
+			undef ;
+
 	return undef unless $out->{clone} ;
 	$out->{clone}->SQLRollback ;
 	$out->{id} = $out->{clone}->sqlobjectid ;	## lc method name
@@ -442,7 +447,7 @@ sub record {
 			[ intkey => $tied->{id} ],
 			[ intvalue => $out->{id} ],
 			[ objectid => $out->{id} ]
-			) if $update ;
+			) if $value ;
 
 	tie my %out, __PACKAGE__, $out ;
 	return bless \%out, $package ;
@@ -713,7 +718,7 @@ subclasses NoSQL::PL2SQL::Simple.  In many cases, the subclass is no more
 than a name that identifies the definition.  The data definition is 
 encapsulated in the class's instantiation or I<instance>.  (I'm using fairly 
 precise nomenclature.)  Many of NoSQL::PL2SQL::Simple's methods are called 
-via the instance (or container).
+via the instance (or collection).
 
 Data content is encapsulated in class I<objects>.  Methods to access or
 modify data content are called via these objects.  Both objects and the 
@@ -725,7 +730,7 @@ variable names to distinguish each in your code.
 =head3 new()
 
 According to the wisdom of OO pattern science, the I<constructor> is used
-to create the I<instance>.  And a I<factory> (generally applied to the 
+to create the I<instance>.  And a I<factory> (usually applied to the 
 instance) is used to create the I<objects>.
 
 =head3 db()
@@ -858,7 +863,7 @@ follows that the query methods are called on the instance.
 =head3 query()
 
 Reading and writing data objects does not require a very complicated API.  
-(NoSQL::PL2SQL has practicallyj none).  The power and complexity of 
+(NoSQL::PL2SQL has practically none).  The power and complexity of 
 NoSQL::PL2SQL::Simple lies in its query capabilities.  So this section 
 will be more detailed.  Most of the API consists of a single method, 
 C<query()>.  Naturally, this method is overloaded, so several variations
@@ -867,8 +872,7 @@ are described.
 =head3 AUTOLOAD()
 
 Additionally, C<query()> is aliased by C<AUTOLOAD()>.  AUTOLOAD is not 
-necessarily a universally loved perl feature, but it can improve code
-readability.  
+universally loved perl feature, but it can improve code readability.  
 
 =head3 recordID() ;
 
@@ -900,6 +904,7 @@ includes an idiom that is a little cleaner.
   warn "entry not found" unless @session ;
   warn "duplicate entries found" if @session > 1 ;
 
+  ## Each of the following statements returns the same value
   $session = $sessions[0] ;
   $session = $instance->query( Email =>'jim@tqis.com' )->record ;
   $session = $instance->Email('jim@tqis.com')->record ;		## AUTOLOAD
@@ -946,13 +951,13 @@ each element's key is accompanied by its associated NVP value.
   print "select your password from below\n" ;
   map { printf "%s\n", $passwords{$_} } @email ;
 
-Many of these extended query options are designed to access data with 
-minimal time and resources. 
+These extended query options are designed to access data with minimal 
+time and resources. 
 
 =head2 Object Methods
 
-Perl objects data can usually do not require accessor methods.  For
-an object consisting of NVP's, data is accessed as follows:
+Perl objects data usually do not require accessor methods.  For an 
+object consisting of NVP's, data is accessed as follows:
 
   $value = $object->{name} ;
 
@@ -976,10 +981,11 @@ objects unique internal key:
 
 These methods are aliases for instance methods:
 
-  $instance->record( $object->SQLObjectID, $object ) ;	## not very elegant
-  $object->save ;					## terse alternative
+  $instance->record( $object ) ;
+  $object->save ;					## equivalent
   
-  $instance->delete( $object->SQLObjectID ) ;
+  $instance->delete( $object ) ;
+  $instance->delete( $object->SQLObjectID ) ;		## equivalent
   $object->delete ;					## equivalent
 
 NoSQL::PL2SQL::Simple has many shortcuts, but be careful
@@ -997,7 +1003,8 @@ perl's I<bless> feature adds lots of magical capabilities to a reference,
 and its I<TIE> feature adds even more.  As shown, the C<SQLObjectID()> 
 method returns undefined for untied objects.  But the recommended approach 
 is to avoid explicitly calling C<bless()> at all.  NoSQL::PL2SQL always 
-blesses tied objects, which avoids the possibility of blessed untied objects.
+simultaneously blesses and ties objects, which avoids the possibility of 
+blessed untied objects.
 
 =head3 reindex()
 
@@ -1181,15 +1188,20 @@ I<First Solution> in the previous example.
 =head2 Archiving Records
 
 NoSQL::PL2SQL has a feature called incremental updates:  Whenever an object
-is modified, only the modifications are written to the data source.  This 
-feature is not included in NoSQL::PL2SQL::Simple.  When an object is updated, 
-the old data is deleted and the replacement is written as new data.  From 
-a performance standpoint, it's slightly faster simply to write out new data, 
-at the expense of increased data storage requirements.  But if data storage 
-isn't an issue, NoSQL::PL2SQL::Simple can act like a time machine archiving 
-each version of stored data.
+is modified, only the modifications are written to the data source.  
+NoSQL::PL2SQL::Simple will occassionally take advantage of this feature:
 
-This feature can be easily turned on using the following data definition:
+  $object->save ;			## Incremental write
+  $object->save( $newobject );		## Full rewrite
+
+On a full rewrite, the old data is deleted and the replacement is written 
+as new data.  In this case, it's slightly faster to avoid deleting the
+old data if data storage isn't an issue.  NoSQL::PL2SQL::Simple allows
+this operation, and acts like a time machine that archives each version of 
+stored data for all write operations.
+
+This feature is enabled by adding an element named I<archive> to the data
+definition:
 
   $instance->addNumberIndex( qw( archive ) ) ;	## on installation
 
@@ -1226,8 +1238,8 @@ that uniqueness.
 When a record is saved, its indexes are all rebuilt.  This implementation
 deletes all the index records associated with the record, and then 
 automatically inserts new records to reflect replacement values.  So the
-manual C<keyValues()> operation must be manually repeated upon every save,
-as shown in the code below.
+C<keyValues()> operation must be manually repeated upon every save, as 
+shown in the code below.
 
   $sessiondata = ... ; 	## unblessed, untied raw data
   $object = $instance->save( $sessionID, $sessiondata ) ;
@@ -1235,11 +1247,11 @@ as shown in the code below.
   $object->keyValues('GroupID')->clear ;	## currently unnecessary
   $object->keyValues( GroupID => @groups ) ;
 
-This example works fine, because the elements in C<@groups> are accessible
-for this manual operation.  In practical terms, if users select their own 
-groups, the group relationships should always be defined within 
-C<$sessiondata>.  However, if there are other operations that define the
-group-user relationships, that data needs to be more persistent.
+This example works fine, because the elements in C<@groups> are 
+readily accessible.  In practice, if users select their own groups, the 
+group relationships should always be defined within C<$sessiondata>.  
+However, if other external operations also define the group-user 
+relationships, that data needs to be more persistent.
 
 The C<keyValues()> method is extended so that the following workaround is
 available:
@@ -1256,8 +1268,8 @@ users insert new group relationships during this operation.
 Ultimately, the solution is to flag index records that are manually 
 defined to guarantee their persistence.  This feature is not 
 particularly complicated, but requires a change to the underlying
-data structure.  Because this effort involves NoSQL::PL2SQL::DBI and 
-worrying about backward compatibility, it is planned for the next 
+data structure.  Because the effort involves NoSQL::PL2SQL::DBI and 
+worrying about backward compatibility, the change is planned for the next 
 major release.
 
 =head1 EXPORT 
@@ -1282,7 +1294,7 @@ Jim Schueler, E<lt>jim@tqis.comE<gt>
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2012 Jim Schueler
+Copyright (C) 2012-2013 Jim Schueler
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself, either Perl version 5.8.9 or,
