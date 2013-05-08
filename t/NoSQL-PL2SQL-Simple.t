@@ -5,7 +5,7 @@
 
 # change 'tests => 1' to 'tests => last_test_to_print';
 
-use Test::More tests => 55;
+use Test::More tests => 56;
 BEGIN { use_ok('XML::Parser::Nodes') };
 BEGIN { use_ok('NoSQL::PL2SQL::DBI::SQLite') };
 BEGIN { use_ok('NoSQL::PL2SQL::DBI') };
@@ -369,6 +369,10 @@ is( $ok[0] => $id ) ;
 @ok = $employees->dependents('Eva')->recordID ;
 is( @ok => 1 ) ;
 is( $ok[0] => $id ) ;
+
+$schueler[0]->keyValues('dependents')->clear('Clara') ;
+@ok = $schueler[0]->keyValues('dependents') ;
+is( @ok => 2 ) ;
 
 $schueler[0]->keyValues('dependents')->clear ;
 @ok = $schueler[0]->keyValues('dependents') ;

@@ -19,7 +19,7 @@ our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } ) ;
 our @EXPORT = qw(
 	) ;
 
-our $VERSION = '0.22' ;
+our $VERSION = '0.23' ;
 
 use Scalar::Util ;
 use base qw( NoSQL::PL2SQL ) ;
@@ -158,6 +158,8 @@ $private{matching} = sub {
 				] ;
 	unless ( @_ ) {
 		my @rows = $tied->{dsn}->{index}->fetch( @sql ) ;
+
+		return [] unless @rows ;
 		return $rows[0] unless ref $rows[0] ;
 		return [] unless keys %{ $rows[0] } ;
 
@@ -495,12 +497,16 @@ sub keyValues {
 	my $tied = tied %$instance ;
 	my $dsn = $tied->{dsn}->{index} ;
 	my $format = $sql{ $instance->{$indexid} } ;
-	my @sql = ( [ $format->[0], $tied->{keys}->{$indexid} ], 
-			[ objectid => $self->SQLObjectID ] ) ;
+	my @sql = ( [ objectid => $self->SQLObjectID ],
+			[ $format->[0], $tied->{keys}->{$indexid} ] 
+			) ;
 
 	if ( @_ == 0 ) {
-		return bless [ $dsn, @sql ], __PACKAGE__ .'::keyValues'
+		return bless [ $dsn, 
+				[ $format->[1], undef, $format->[2] ],
+				@sql ], __PACKAGE__ .'::keyValues' 
 				unless wantarray ;
+
 		return map { $_->{ $format->[1] } } $dsn->fetch( @sql ) ;
 		}
 
@@ -510,29 +516,38 @@ sub keyValues {
 sub NoSQL::PL2SQL::Simple::keyValues::clear {
 	my $args = shift ;
 	my $dsn = shift @$args ;
-	$dsn->delete( @$args ) ;
+
+	shift @$args unless @_ ;
+	$args->[0]->[1] = shift @_ if @_ ;
+	return $dsn->delete( @$args ) ;
 	}
 
 sub delete {
 	my $self = shift ;
 	my $tied = tied %$self ;
 	my $package = ref $self ;
+	my $recno = shift if @_ ;
 
-	return undef unless @_ ;
-	my $recno = shift ;
-	
-	if ( ref $recno ) {
-		my $rec = tied %$recno ;
-		$recno = $rec->{id} ;
+	if ( $tied->{parent} ) {
+		$recno = $self ;
+		$tied = tied %{ $tied->{parent} } ;
 		}
+
+	return undef unless $recno ;
+	$recno = $recno->SQLObjectID if ref $recno ;
 
 	my @sql = () ;
 	push @sql, [ $sql{intkey}->[0], $tied->{id} ] ;
 	push @sql, [ $sql{intkey}->[1], $recno ] ;
 	$tied->{dsn}->{index}->delete( @sql ) ;
-	return undef ;
+	return $recno ;
 	}
 
+sub querytest {
+	return &{ $private{matching} }( @_ ) ;
+	}
+
+## double check how empty sets are returned
 sub query {
 	my $self = shift ;
 	my $package = ref $self ;
@@ -556,9 +571,10 @@ sub query {
 
 	$all ||= [] ;
 	my $save = &{ $private{filter} }( [ keys %{ { @$all } } ] ) ;
-	$save = $archive? [ keys %{ { @$out } } ]:
-			&{ $private{filter} }( $save, [ keys %{ { @$out } } ] )
-			if $out != $all ;
+	$save = &{ $private{filter} }( 
+			$archive? (): ( $save ), 
+			[ keys %{ { @$out } } ]
+			) if $out != $all ;
 
 	while ( @nvp ) {
 		$out = &{ $private{matching} }( $self, @{ pop @nvp } ) || [] ;
@@ -1037,6 +1053,17 @@ all of the following code is now required to save session data:
   $object->keyValues('GroupID')->clear ;
   $object->keyValues( GroupID => @groups ) ;
 
+Relationships defined by the C<keyValues()> method are intended to be
+persistent.  See the discussion under L<CAVEATS>.
+
+=head3 clear()
+
+The C<clear()> method is indirectly applied to a NoSQL::PL2SQL::Simple
+object as follows:
+
+  @groups = $object->keyValues('GroupID') ;
+  $object->keyValues('GroupID')->clear ;		## Deletes all keys
+  $object->keyValues('GroupID')->clear( $groups[0] ) ;	## Selective
 
 =head1 DATA SOURCE CLASSES
 
@@ -1192,6 +1219,46 @@ that uniqueness.
 		$instance->UserID( $sessiondata->{UserID} ) ;
   $instance->save( @args, $sessiondata ) ;
 
+=head1 CAVEATS
+
+=head2 keyValues()
+
+When a record is saved, its indexes are all rebuilt.  This implementation
+deletes all the index records associated with the record, and then 
+automatically inserts new records to reflect replacement values.  So the
+manual C<keyValues()> operation must be manually repeated upon every save,
+as shown in the code below.
+
+  $sessiondata = ... ; 	## unblessed, untied raw data
+  $object = $instance->save( $sessionID, $sessiondata ) ;
+  @groups = map { $_->{id} } @{ $object->{Groups} } ;
+  $object->keyValues('GroupID')->clear ;	## currently unnecessary
+  $object->keyValues( GroupID => @groups ) ;
+
+This example works fine, because the elements in C<@groups> are accessible
+for this manual operation.  In practical terms, if users select their own 
+groups, the group relationships should always be defined within 
+C<$sessiondata>.  However, if there are other operations that define the
+group-user relationships, that data needs to be more persistent.
+
+The C<keyValues()> method is extended so that the following workaround is
+available:
+
+  $sessiondata = ... ; 	## unblessed, untied raw data
+  @groups = $instance->record( $sessionID )->keyValues('GroupID') ;
+  ## potential race condition occurs here
+  $object = $instance->save( $sessionID, $sessiondata ) ;
+  $object->keyValues( GroupID => @groups ) ;
+
+The problem with this approach is a potential race condition if other
+users insert new group relationships during this operation.
+
+Ultimately, the solution is to flag index records that are manually 
+defined to guarantee their persistence.  This feature is not 
+particularly complicated, but requires a change to the underlying
+data structure.  Because this effort involves NoSQL::PL2SQL::DBI and 
+worrying about backward compatibility, it is planned for the next 
+major release.
 
 =head1 EXPORT 
 

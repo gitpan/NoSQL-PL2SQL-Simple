@@ -19,3 +19,10 @@ Revision history for Perl extension NoSQL::PL2SQL::Simple.
 	- Added delete() method
 	- Rewrote documentation (should be coherent now)
 
+0.23  Tue May  7 22:56:03 EDT 2013
+	- Fixed a problem where empty query requests sometimes 
+	  returns a single undefined element
+	- delete() can now be called via an instance or object
+	- keyValues()->clear() can now be called with an argument
+	- Added CAVEATS to documentation
+
